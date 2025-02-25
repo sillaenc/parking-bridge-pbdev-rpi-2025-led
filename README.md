@@ -1,2 +1,4 @@
-A sample command-line application with an entrypoint in `bin/`, library code
-in `lib/`, and example unit test in `test/`.
+## 진행 계획표
+- [x] 송신 테스트  
+- [ ] 공휴일 적용  
+- [ ] 저감조치(2부제) 발령 조치  
