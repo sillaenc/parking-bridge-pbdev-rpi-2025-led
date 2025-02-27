@@ -9,10 +9,10 @@ String? lastCombinedCommand;
 Map<String, dynamic> settings = {};
 String? restrictionOverride;
 
-// 공휴일 정보를 저장할 집합: "YYYYMMDD" 문자열, TEXT 형태로 옴..
+// 공휴일 정보를 저장할 집합: "YYYYMMDD" 문자열
 final Set<String> holidaySet = {};
 
-// 설정 파일 로드 (assets/setting.json)
+// --------------------------- 설정 파일 로드 ---------------------------
 Future<Map<String, dynamic>> loadSettings() async {
   try {
     String content = await File('assets/setting.json').readAsString();
@@ -23,9 +23,7 @@ Future<Map<String, dynamic>> loadSettings() async {
   }
 }
 
-/// 공휴일 정보 업데이트 함수
-/// db_url로 POST 요청: body => {"transaction":[{"query":"#holimoli"}]}
-/// 응답 예시: [{"uid":"holy0001","name":"신정","date":"20250101"}, ...]
+// --------------------------- 공휴일 업데이트 ---------------------------
 Future<void> updateHolidayInfo() async {
   String? url = settings["db_url"]?.toString();
   if (url == null || url.isEmpty) {
@@ -51,18 +49,17 @@ Future<void> updateHolidayInfo() async {
     print("공휴일 API 내용: ${resp.body}");
 
     if (resp.statusCode == 200) {
-      // 최상위 JSON 파싱
       var raw = jsonDecode(resp.body);
       // raw: { "results": [ { "success":true, "resultSet": [...], ... } ] }
-      // 결과 배열 찾기
+
       if (raw is Map && raw["results"] is List) {
         List<dynamic> results = raw["results"];
         if (results.isNotEmpty && results[0] is Map) {
           Map firstResult = results[0];
-          // firstResult: { "success":true, "resultSet":[...], ... }
           if (firstResult["resultSet"] is List) {
             List<dynamic> resultSet = firstResult["resultSet"];
-            // resultSet: [{ "uid":1,"name":"1월1일","date":"20250101"}, ... ]
+            // [{ "uid":1,"name":"1월1일","date":"20250101"}, ... ]
+
             holidaySet.clear();
             for (var item in resultSet) {
               if (item is Map && item["date"] is String) {
@@ -90,8 +87,8 @@ Future<void> updateHolidayInfo() async {
   }
 }
 
-/// 웹서버 (포트 8888) → GET ?value=10/11/20 등으로 override
-/// 10은 짝수, 11은 홀수, 20은 다시 5부제로 돌아가는 명령어
+// --------------------------- 웹서버 (override) 시작 ---------------------------
+/// ?value=10 -> 5부제 라인 "짝수", ?value=11 -> "홀수", ?value=20 -> 다시 5부제로
 void startOverrideServer() async {
   int listenPort = int.tryParse(settings["listen_port"]?.toString() ?? "") ?? 8888;
   try {
@@ -119,16 +116,6 @@ void startOverrideServer() async {
   }
 }
 
-// line{n}Text → n
-int extractLineNumber(String key) {
-  RegExp regExp = RegExp(r'line(\d+)Text');
-  Match? match = regExp.firstMatch(key);
-  if (match != null) {
-    return int.parse(match.group(1)!);
-  }
-  return 0;
-}
-
 Future<void> main() async {
   // 설정 파일 로드
   settings = await loadSettings();
@@ -144,7 +131,7 @@ Future<void> main() async {
   });
 }
 
-/// 주기적으로 실행되는 메인 로직
+// --------------------------- 주기적으로 실행되는 메인 로직 ---------------------------
 Future<void> runPeriodicTask() async {
   try {
     // floor 설정
@@ -157,31 +144,35 @@ Future<void> runPeriodicTask() async {
     String responseBody = await response.transform(utf8.decoder).join();
     List<dynamic> mainData = json.decode(responseBody);
 
-    // line 설정
-    Map<String, dynamic> lineSettings = settings["line"] ?? {};
-    List<MapEntry<String, dynamic>> entries = lineSettings.entries.toList();
-    entries.sort((a, b) => extractLineNumber(a.key).compareTo(extractLineNumber(b.key)));
+    // "line"은 배열로, 각 요소가 {"text":"..."} 형태
+    // 예: [ {"text":"5부제, C01"}, {"text":"1, C03"}, ... ]
+    List lineList = settings["line"] as List? ?? [];
 
-    // 각 줄에 대한 명령문 생성
     List<String> commands = [];
-    for (var entry in entries) {
-      int lineNum = extractLineNumber(entry.key);
-      String settingValue = entry.value.toString();
+    for (int i = 0; i < lineList.length; i++) {
+      var item = lineList[i];
+      // item 예: {"text":"5부제, C01"}
+      if (item is Map && item.containsKey("text")) {
+        String settingValue = item["text"].toString();
+        // 라인 번호 = i+1
+        int lineNum = i + 1;
 
-      // 줄 텍스트 (비동기)
-      String text = await getLineText(settingValue, mainData);
+        // 줄 텍스트 (비동기)
+        String text = await getLineText(settingValue, mainData);
 
-      // 색상
-      String defaultColor = "C${lineNum.toString().padLeft(2, '0')}";
-      String color = getLineColor(settingValue, defaultColor: defaultColor);
+        // 색상
+        String defaultColor = "C${lineNum.toString().padLeft(2, '0')}";
+        String color = getLineColor(settingValue, defaultColor: defaultColor);
 
-      // 명령문
-      String command = constructCommand(lineNum, text, color);
-      commands.add(command);
+        // 명령문
+        String command = constructCommand(lineNum, text, color);
+        commands.add(command);
+      }
     }
 
     String combinedCommand = commands.join("");
-    // print("Combined command: $combinedCommand");
+    var check = DateTime.now();
+    print("로그용 시간 확인 : $check");
     print("패킷 내용: $combinedCommand");
 
     if (combinedCommand == lastCombinedCommand) {
@@ -198,10 +189,9 @@ Future<void> runPeriodicTask() async {
   }
 }
 
-/// 줄 텍스트 결정
-/// - "5부제"가 포함되어 있으면 5부제 로직
-/// - 그 외 lot_type들 합산 (F/B로 시작하면 서브 API)
+// --------------------------- 줄 텍스트 결정 ---------------------------
 Future<String> getLineText(String settingValue, List<dynamic> mainData) async {
+  int digits = int.tryParse(settings["digits"]?.toString() ?? "") ?? 3;
   ParsedSetting parsed = parseLineSetting(settingValue);
   // 5부제?
   if (parsed.lotParts.any((lot) => lot.trim().toLowerCase() == "5부제")) {
@@ -212,11 +202,10 @@ Future<String> getLineText(String settingValue, List<dynamic> mainData) async {
   for (String lot in parsed.lotParts) {
     sum += await getLotCount(lot, mainData);
   }
-  return sum.toString().padLeft(3, '0');
+  return sum.toString().padLeft(digits, '0');
 }
 
-/// lot_type이 F/B로 시작 → 서브 API
-/// 아니면 mainData에서 합산
+// --------------------------- lot_type 합산 ---------------------------
 Future<int> getLotCount(String lotTypeStr, List<dynamic> mainData) async {
   String trimmed = lotTypeStr.trim();
   if (trimmed.isEmpty) return 0;
@@ -228,7 +217,6 @@ Future<int> getLotCount(String lotTypeStr, List<dynamic> mainData) async {
         .then((req) => req.close());
     String body = await resp.transform(utf8.decoder).join();
     List<dynamic> subData = json.decode(body);
-    // subData 모든 count 합산
     int sum = 0;
     for (var item in subData) {
       if (item is Map && item.containsKey('count')) {
@@ -259,13 +247,11 @@ Future<int> getLotCount(String lotTypeStr, List<dynamic> mainData) async {
   }
 }
 
-/// 색상 결정
+// --------------------------- 색상 결정 ---------------------------
 String getLineColor(String settingValue, {String defaultColor = "C01"}) {
   ParsedSetting parsed = parseLineSetting(settingValue);
   bool hasFiveBuJe = parsed.lotParts.any((lot) => lot.trim().toLowerCase() == "5부제");
-  
-  // 5부제여도 사용자 지정 색상이 있으면 그걸 쓰고,
-  // 없으면 defaultColor 사용.
+  // 5부제라도 사용자 지정 색상 있으면 우선 사용
   if (hasFiveBuJe) {
     return parsed.color.isNotEmpty ? parsed.color : defaultColor;
   } else {
@@ -273,7 +259,7 @@ String getLineColor(String settingValue, {String defaultColor = "C01"}) {
   }
 }
 
-/// 5부제 (요일)
+// --------------------------- 5부제 + override 로직 ---------------------------
 String getFiveRestrictionText() {
   // override 처리
   if (restrictionOverride != null) {
@@ -282,12 +268,11 @@ String getFiveRestrictionText() {
     } else if (restrictionOverride == "11") {
       return "홀수";
     } else if (restrictionOverride == "20") {
-      // override 해제
       restrictionOverride = null;
-      // 이어서 원래 5부제 로직 적용
     }
   }
-  
+
+  // 원래 5부제 로직
   DateTime now = DateTime.now();
   if (isPublicHoliday(now)) {
     return "휴일";
@@ -308,20 +293,20 @@ String getFiveRestrictionText() {
   }
 }
 
-/// 공휴일 판별 (holidaySet 사용)
-/// holidaySet에는 "YYYYMMDD" 형태로 저장
+// --------------------------- 공휴일 판별 ---------------------------
 bool isPublicHoliday(DateTime date) {
-  String yyyymmdd = formatYYYYMMDD(date); 
+  String yyyymmdd = formatYYYYMMDD(date);
   return holidaySet.contains(yyyymmdd);
 }
 
-/// 날짜를 "YYYYMMDD"로 포매팅
 String formatYYYYMMDD(DateTime date) {
   return "${date.year}${date.month.toString().padLeft(2,'0')}${date.day.toString().padLeft(2,'0')}";
 }
 
-/// 설정 문자열 파싱 ("1+4, C03" → lotParts=["1","4"], color="C03")
+// --------------------------- 설정 문자열 파싱 ---------------------------
 ParsedSetting parseLineSetting(String settingStr) {
+  // 예: "5부제, C01" → lotPart="5부제", color="C01"
+  // 예: "1+4, C03"  → lotPart="1+4", color="C03"
   List<String> parts = settingStr.split(',');
   if (parts.isEmpty) {
     return ParsedSetting(lotParts: [], color: "");
@@ -339,14 +324,13 @@ ParsedSetting parseLineSetting(String settingStr) {
   return ParsedSetting(lotParts: lotList, color: color);
 }
 
-/// 파싱된 설정
 class ParsedSetting {
   List<String> lotParts;
   String color;
   ParsedSetting({required this.lotParts, required this.color});
 }
 
-/// TCP 소켓 전송
+// --------------------------- TCP 소켓 전송 ---------------------------
 Future<void> sendPacket(Uint8List packet) async {
   String ip = settings["IP"] ?? "192.168.0.214";
   int port = int.tryParse(settings["PORT"] ?? "5000") ?? 5000;
@@ -371,7 +355,7 @@ Future<void> sendPacket(Uint8List packet) async {
   }
 }
 
-/// 패킷 생성
+// --------------------------- 패킷 생성 ---------------------------
 Uint8List buildPacketWithType(String command, int type) {
   List<int> dataBytes = utf16leEncode(command);
   int dataLength = dataBytes.length;
@@ -379,6 +363,7 @@ Uint8List buildPacketWithType(String command, int type) {
   const int STX = 0x02;
   packet.add(STX);
   packet.add(type);
+  // LENGTH(2바이트, little-endian)
   packet.add(dataLength & 0xFF);
   packet.add((dataLength >> 8) & 0xFF);
   packet.addAll(dataBytes);
@@ -393,7 +378,7 @@ Uint8List buildPacketWithType(String command, int type) {
   return Uint8List.fromList(packet);
 }
 
-/// UTF-16LE 인코딩
+// --------------------------- UTF-16LE 인코딩 ---------------------------
 List<int> utf16leEncode(String input) {
   List<int> bytes = [];
   for (int codeUnit in input.codeUnits) {
@@ -403,12 +388,12 @@ List<int> utf16leEncode(String input) {
   return bytes;
 }
 
-/// 광고 명령문
+// --------------------------- 광고 명령문 ---------------------------
 String constructCommand(int line, String text, String colorCode) {
   return "RST=1,LNE=$line,YSZ=1,EFF=090009000900,FIX=0,TXT=\$$colorCode\$F00\$A00$text,";
 }
 
-/// 바이트 배열 → 16진수 (디버깅용)
+// --------------------------- 디버깅용 (바이트→16진수) ---------------------------
 String _bytesToHex(List<int> bytes) {
   return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(" ");
 }
