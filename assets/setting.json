@@ -1,16 +1,27 @@
 {
-    "line":[
-        {"text" : "5부제, C01"},
-        {"text" : "1, C03"},
-        {"text" : "2, C03"},
-        {"text" : "3, C03"},
-        {"text" : "4, C03"},
-        {"text" : "F2, C03"}
+    "line": [
+        {
+            "text": "5부제, C01"
+        },
+        {
+            "text": "1, C03"
+        },
+        {
+            "text": "2, C03"
+        },
+        {
+            "text": "3, C03"
+        },
+        {
+            "text": "4, C03"
+        },
+        {
+            "text": "F2, C03"
+        }
     ],
-    "IP":"192.168.0.214",
-    "PORT":"5000",
-    "floor":"F1",
-    "db_url":"http://localhost:18181/holidays",
-    "listen_port":8888,
-    "digits":3
+    "IP": "192.168.0.214",
+    "PORT": "5000",
+    "floor": "F1",
+    "db_url": "http://localhost:18181/holidays",
+    "digits": 3
 }

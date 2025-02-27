@@ -4,30 +4,125 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 
-// 전역 변수
-String? lastCombinedCommand;
-Map<String, dynamic> settings = {};
-String? restrictionOverride;
+// --------------------- 전역 변수 ---------------------
+Map<String, dynamic> settings = {};          // setting.json의 내용
+String? restrictionOverride;                // override 값
+String? lastCombinedCommand;                // 이전 패킷
 
-// 공휴일 정보를 저장할 집합: "YYYYMMDD" 문자열
-final Set<String> holidaySet = {};
+final Set<String> holidaySet = {};          // 공휴일(YYYYMMDD)
 
-// --------------------------- 설정 파일 로드 ---------------------------
-Future<Map<String, dynamic>> loadSettings() async {
+// --------------------- main 함수 ---------------------
+Future<void> main() async {
+  // 1) listen_port.json에서 포트 읽기
+  int listenPort = await loadListenPort();
+
+  // 2) 웹서버 시작 (override, /updateSetting, /checkSetting 라우터)
+  startOverrideServer(listenPort);
+
+  // 3) setting.json 로드 (없으면 1분마다 재시도)
+  settings = await loadSettingsLoop();
+
+  // 4) 공휴일 정보 업데이트
+  await updateHolidayInfo();
+
+  // 5) 2초마다 메인 로직
+  Timer.periodic(Duration(seconds: 2), (timer) async {
+    await runPeriodicTask();
+  });
+}
+
+// --------------------- 1) listen_port.json 로드 ---------------------
+Future<int> loadListenPort() async {
   try {
-    String content = await File('assets/setting.json').readAsString();
-    return json.decode(content);
+    String content = await File('assets/listen_port.json').readAsString();
+    Map<String, dynamic> obj = jsonDecode(content);
+    int p = int.tryParse(obj["listen_port"]?.toString() ?? "") ?? 8888;
+    print("listen_port.json에서 포트=$p 로드됨");
+    return p;
   } catch (e) {
-    print("Error loading assets/setting.json: $e");
-    return {};
+    print("listen_port.json 없거나 오류. 기본 포트 8888 사용. 에러: $e");
+    return 8888;
   }
 }
 
-// --------------------------- 공휴일 업데이트 ---------------------------
+// --------------------- 2) 웹서버 시작 ---------------------
+void startOverrideServer(int listenPort) async {
+  try {
+    var server = await HttpServer.bind(InternetAddress.anyIPv4, listenPort);
+    print("$listenPort 포트로 웹서버 실행중");
+
+    await for (HttpRequest request in server) {
+      try {
+        // 라우터 구분
+        request.response.headers.add('Access-Control-Allow-Origin', '*');
+        request.response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        request.response.headers.add('Access-Control-Allow-Headers', 'Content-Type');
+        
+        if (request.uri.path == '/checkSetting') {
+          // setting.json 존재 여부 확인
+          bool exists = File('assets/setting.json').existsSync();
+          request.response.write(exists ? '1' : '0');
+          await request.response.close();
+        }
+        else if (request.uri.path == '/updateSetting' && request.method == 'POST') {
+          // body의 JSON으로 setting.json 갱신
+          String body = await utf8.decoder.bind(request).join();
+          try {
+            var newCfg = jsonDecode(body);
+            // 파일에 덮어쓰기
+            await File('assets/setting.json').writeAsString(jsonEncode(newCfg));
+            // 메모리상 settings도 갱신
+            settings = newCfg;
+            print("setting.json 업데이트 + 재로드 완료");
+            request.response.write("OK");
+          } catch (e) {
+            request.response.write("ERROR: $e");
+          }
+          await request.response.close();
+        }
+        else {
+          // ?value=10/11/20 override
+          String? value = request.uri.queryParameters["value"];
+          if (value != null) {
+            restrictionOverride = value;
+            print("Override set to $value");
+            request.response.write("Override set to $value");
+          } else {
+            request.response.write("No value provided");
+          }
+          await request.response.close();
+        }
+      } catch (e) {
+        request.response.statusCode = HttpStatus.internalServerError;
+        request.response.write("Error: $e");
+        await request.response.close();
+      }
+    }
+  } catch (e) {
+    print("웹서버 시작 에러: $e");
+  }
+}
+
+// --------------------- 3) setting.json 로드(재시도) ---------------------
+Future<Map<String, dynamic>> loadSettingsLoop() async {
+  while (true) {
+    try {
+      String content = await File('assets/setting.json').readAsString();
+      Map<String, dynamic> cfg = jsonDecode(content);
+      print("setting.json 로드 성공");
+      return cfg;
+    } catch (e) {
+      print("setting.json 없음. 1분 뒤 재시도... 에러: $e");
+      await Future.delayed(Duration(minutes: 1));
+    }
+  }
+}
+
+// --------------------- 4) 공휴일 업데이트 ---------------------
 Future<void> updateHolidayInfo() async {
   String? url = settings["db_url"]?.toString();
   if (url == null || url.isEmpty) {
-    print("No db_url in settings. Skipping holiday update.");
+    print("db_url 없음, 공휴일 업데이트 스킵");
     return;
   }
 
@@ -39,104 +134,41 @@ Future<void> updateHolidayInfo() async {
   };
 
   try {
-    var resp = await http.post(
-      Uri.parse(url),
-      headers: headers,
-      body: jsonEncode(body),
-    );
-
-    print("공휴일 api 응답코드: ${resp.statusCode}");
+    var resp = await http.post(Uri.parse(url), headers: headers, body: jsonEncode(body));
+    print("공휴일 API 응답코드: ${resp.statusCode}");
     print("공휴일 API 내용: ${resp.body}");
 
     if (resp.statusCode == 200) {
       var raw = jsonDecode(resp.body);
-      // raw: { "results": [ { "success":true, "resultSet": [...], ... } ] }
-
       if (raw is Map && raw["results"] is List) {
         List<dynamic> results = raw["results"];
         if (results.isNotEmpty && results[0] is Map) {
           Map firstResult = results[0];
           if (firstResult["resultSet"] is List) {
             List<dynamic> resultSet = firstResult["resultSet"];
-            // [{ "uid":1,"name":"1월1일","date":"20250101"}, ... ]
-
             holidaySet.clear();
             for (var item in resultSet) {
               if (item is Map && item["date"] is String) {
-                String dateStr = item["date"].trim(); // "20250101"
+                String dateStr = item["date"].trim();
                 if (dateStr.length == 8) {
                   holidaySet.add(dateStr);
                 }
               }
             }
-            print("공휴일 정보 업데이트 완료: $holidaySet");
-          } else {
-            print("공휴일 정보 없음. 에러!1");
+            print("공휴일 업데이트 완료: $holidaySet");
           }
-        } else {
-          print("공휴일 정보 없음. 에러!2");
         }
-      } else {
-        print("R공휴일 정보 없음. 에러!3");
-      }
-    } else {
-      print("공휴일 정보 없음. 에러!4");
-    }
-  } catch (e) {
-    print("공휴일 정보 업데이트 예외상황 발생: $e");
-  }
-}
-
-// --------------------------- 웹서버 (override) 시작 ---------------------------
-/// ?value=10 -> 5부제 라인 "짝수", ?value=11 -> "홀수", ?value=20 -> 다시 5부제로
-void startOverrideServer() async {
-  int listenPort = int.tryParse(settings["listen_port"]?.toString() ?? "") ?? 8888;
-  try {
-    var server = await HttpServer.bind(InternetAddress.anyIPv4, listenPort);
-    print("$listenPort 포트로 웹서버 실행중");
-    await for (HttpRequest request in server) {
-      try {
-        String? value = request.uri.queryParameters["value"];
-        if (value != null) {
-          restrictionOverride = value;
-          print("Override set to $value");
-          request.response.write("Override set to $value");
-        } else {
-          request.response.write("No value provided");
-        }
-      } catch (e) {
-        request.response.statusCode = HttpStatus.internalServerError;
-        request.response.write("Error: $e");
-      } finally {
-        await request.response.close();
       }
     }
   } catch (e) {
-    print("웹서버 시작 에러 발생: $e");
+    print("공휴일 업데이트 예외상황: $e");
   }
 }
 
-Future<void> main() async {
-  // 설정 파일 로드
-  settings = await loadSettings();
-  // 공휴일 정보 업데이트 (프로그램 시작 시 1회)
-  await updateHolidayInfo();
-
-  // override 웹서버 시작
-  startOverrideServer();
-
-  // 2초마다 실행
-  Timer.periodic(Duration(seconds: 2), (timer) async {
-    await runPeriodicTask();
-  });
-}
-
-// --------------------------- 주기적으로 실행되는 메인 로직 ---------------------------
+// --------------------- 5) 2초마다 실행되는 메인 로직 ---------------------
 Future<void> runPeriodicTask() async {
   try {
-    // floor 설정
     String floor = settings["floor"]?.toString() ?? "F1";
-
     // 메인 API 호출
     final response = await HttpClient()
         .getUrl(Uri.parse("http://localhost:8080/billboard/$floor"))
@@ -144,25 +176,22 @@ Future<void> runPeriodicTask() async {
     String responseBody = await response.transform(utf8.decoder).join();
     List<dynamic> mainData = json.decode(responseBody);
 
-    // "line"은 배열로, 각 요소가 {"text":"..."} 형태
-    // 예: [ {"text":"5부제, C01"}, {"text":"1, C03"}, ... ]
+    // line은 배열. ex: [ {"text":"5부제, C01"}, {"text":"1, C03"}, ... ]
     List lineList = settings["line"] as List? ?? [];
 
     List<String> commands = [];
     for (int i = 0; i < lineList.length; i++) {
       var item = lineList[i];
-      // item 예: {"text":"5부제, C01"}
       if (item is Map && item.containsKey("text")) {
         String settingValue = item["text"].toString();
-        // 라인 번호 = i+1
         int lineNum = i + 1;
 
-        // 줄 텍스트 (비동기)
+        // 줄 텍스트
         String text = await getLineText(settingValue, mainData);
 
         // 색상
         String defaultColor = "C${lineNum.toString().padLeft(2, '0')}";
-        String color = getLineColor(settingValue, defaultColor: defaultColor);
+        String color = getLineColor(settingValue, defaultColor);
 
         // 명령문
         String command = constructCommand(lineNum, text, color);
@@ -171,8 +200,6 @@ Future<void> runPeriodicTask() async {
     }
 
     String combinedCommand = commands.join("");
-    var check = DateTime.now();
-    print("로그용 시간 확인 : $check");
     print("패킷 내용: $combinedCommand");
 
     if (combinedCommand == lastCombinedCommand) {
@@ -189,10 +216,11 @@ Future<void> runPeriodicTask() async {
   }
 }
 
-// --------------------------- 줄 텍스트 결정 ---------------------------
+// --------------------- 줄 텍스트 결정 ---------------------
 Future<String> getLineText(String settingValue, List<dynamic> mainData) async {
   int digits = int.tryParse(settings["digits"]?.toString() ?? "") ?? 3;
   ParsedSetting parsed = parseLineSetting(settingValue);
+
   // 5부제?
   if (parsed.lotParts.any((lot) => lot.trim().toLowerCase() == "5부제")) {
     return getFiveRestrictionText();
@@ -205,18 +233,18 @@ Future<String> getLineText(String settingValue, List<dynamic> mainData) async {
   return sum.toString().padLeft(digits, '0');
 }
 
-// --------------------------- lot_type 합산 ---------------------------
+// --------------------- lot_type 합산 ---------------------
 Future<int> getLotCount(String lotTypeStr, List<dynamic> mainData) async {
   String trimmed = lotTypeStr.trim();
   if (trimmed.isEmpty) return 0;
 
-  // F/B로 시작하면 서브 API
   if (trimmed.startsWith("F") || trimmed.startsWith("B")) {
     final resp = await HttpClient()
         .getUrl(Uri.parse("http://localhost:8080/billboard/$trimmed"))
         .then((req) => req.close());
     String body = await resp.transform(utf8.decoder).join();
     List<dynamic> subData = json.decode(body);
+
     int sum = 0;
     for (var item in subData) {
       if (item is Map && item.containsKey('count')) {
@@ -229,7 +257,6 @@ Future<int> getLotCount(String lotTypeStr, List<dynamic> mainData) async {
     }
     return sum;
   } else {
-    // 일반 lot_type → mainData에서 합산
     int sum = 0;
     for (var item in mainData) {
       if (item is Map && item.containsKey('lot_type') && item.containsKey('count')) {
@@ -247,21 +274,20 @@ Future<int> getLotCount(String lotTypeStr, List<dynamic> mainData) async {
   }
 }
 
-// --------------------------- 색상 결정 ---------------------------
-String getLineColor(String settingValue, {String defaultColor = "C01"}) {
+// --------------------- 색상 결정 ---------------------
+String getLineColor(String settingValue, String defaultColor) {
   ParsedSetting parsed = parseLineSetting(settingValue);
   bool hasFiveBuJe = parsed.lotParts.any((lot) => lot.trim().toLowerCase() == "5부제");
-  // 5부제라도 사용자 지정 색상 있으면 우선 사용
   if (hasFiveBuJe) {
+    // 5부제도 사용자 지정 색상 있으면 그걸 사용
     return parsed.color.isNotEmpty ? parsed.color : defaultColor;
   } else {
     return parsed.color.isNotEmpty ? parsed.color : defaultColor;
   }
 }
 
-// --------------------------- 5부제 + override 로직 ---------------------------
+// --------------------- 5부제 + override 로직 ---------------------
 String getFiveRestrictionText() {
-  // override 처리
   if (restrictionOverride != null) {
     if (restrictionOverride == "10") {
       return "짝수";
@@ -271,7 +297,6 @@ String getFiveRestrictionText() {
       restrictionOverride = null;
     }
   }
-
   // 원래 5부제 로직
   DateTime now = DateTime.now();
   if (isPublicHoliday(now)) {
@@ -293,7 +318,7 @@ String getFiveRestrictionText() {
   }
 }
 
-// --------------------------- 공휴일 판별 ---------------------------
+// --------------------- 공휴일 판별 ---------------------
 bool isPublicHoliday(DateTime date) {
   String yyyymmdd = formatYYYYMMDD(date);
   return holidaySet.contains(yyyymmdd);
@@ -303,7 +328,7 @@ String formatYYYYMMDD(DateTime date) {
   return "${date.year}${date.month.toString().padLeft(2,'0')}${date.day.toString().padLeft(2,'0')}";
 }
 
-// --------------------------- 설정 문자열 파싱 ---------------------------
+// --------------------- 설정 문자열 파싱 ---------------------
 ParsedSetting parseLineSetting(String settingStr) {
   // 예: "5부제, C01" → lotPart="5부제", color="C01"
   // 예: "1+4, C03"  → lotPart="1+4", color="C03"
@@ -319,7 +344,6 @@ ParsedSetting parseLineSetting(String settingStr) {
   if (lotPart.isEmpty) {
     return ParsedSetting(lotParts: [], color: color);
   }
-  // '+'로 분리
   List<String> lotList = lotPart.split('+').map((s) => s.trim()).toList();
   return ParsedSetting(lotParts: lotList, color: color);
 }
@@ -330,10 +354,10 @@ class ParsedSetting {
   ParsedSetting({required this.lotParts, required this.color});
 }
 
-// --------------------------- TCP 소켓 전송 ---------------------------
+// --------------------- TCP 소켓 전송 ---------------------
 Future<void> sendPacket(Uint8List packet) async {
   String ip = settings["IP"] ?? "192.168.0.214";
-  int port = int.tryParse(settings["PORT"] ?? "5000") ?? 5000;
+  int port = int.tryParse(settings["PORT"]?.toString() ?? "5000") ?? 5000;
   try {
     Socket socket = await Socket.connect(ip, port, timeout: Duration(seconds: 3));
     print("Socket connected to $ip:$port");
@@ -355,7 +379,7 @@ Future<void> sendPacket(Uint8List packet) async {
   }
 }
 
-// --------------------------- 패킷 생성 ---------------------------
+// --------------------- 패킷 생성 ---------------------
 Uint8List buildPacketWithType(String command, int type) {
   List<int> dataBytes = utf16leEncode(command);
   int dataLength = dataBytes.length;
@@ -367,33 +391,34 @@ Uint8List buildPacketWithType(String command, int type) {
   packet.add(dataLength & 0xFF);
   packet.add((dataLength >> 8) & 0xFF);
   packet.addAll(dataBytes);
+
   int checksum = (STX +
       type +
       (dataLength & 0xFF) +
       ((dataLength >> 8) & 0xFF) +
-      dataBytes.fold<int>(0, (prev, byte) => prev + byte)) &
+      dataBytes.fold<int>(0, (prev, b) => prev + b)) &
       0xFF;
   packet.add(checksum);
   packet.add(0x03);
   return Uint8List.fromList(packet);
 }
 
-// --------------------------- UTF-16LE 인코딩 ---------------------------
+// --------------------- UTF-16LE 인코딩 ---------------------
 List<int> utf16leEncode(String input) {
   List<int> bytes = [];
   for (int codeUnit in input.codeUnits) {
-    bytes.add(codeUnit & 0xFF);       
-    bytes.add((codeUnit >> 8) & 0xFF); 
+    bytes.add(codeUnit & 0xFF);       // 하위 바이트
+    bytes.add((codeUnit >> 8) & 0xFF); // 상위 바이트
   }
   return bytes;
 }
 
-// --------------------------- 광고 명령문 ---------------------------
+// --------------------- 광고 명령문 ---------------------
 String constructCommand(int line, String text, String colorCode) {
   return "RST=1,LNE=$line,YSZ=1,EFF=090009000900,FIX=0,TXT=\$$colorCode\$F00\$A00$text,";
 }
 
-// --------------------------- 디버깅용 (바이트→16진수) ---------------------------
+// --------------------- 바이트 배열 → 16진수 (디버깅용) ---------------------
 String _bytesToHex(List<int> bytes) {
   return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(" ");
 }
