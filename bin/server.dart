@@ -45,6 +45,7 @@ class SettingsManager {
 ///  OverrideServer (CORS + 설정 업데이트 + override)
 /// --------------------------
 class OverrideServer {
+  /// odd, even, original 등 override 값 저장
   String? restrictionOverride;
 
   void start(int listenPort, SettingsManager settingsManager) async {
@@ -85,17 +86,29 @@ class OverrideServer {
               request.response.write("ERROR: $e");
             }
             await request.response.close();
-          } 
-          else {
-            // ?value=10/11/20 override
-            String? value = request.uri.queryParameters["value"];
-            if (value != null) {
-              restrictionOverride = value;
-              print("Override set to $value");
-              request.response.write("Override set to $value");
-            } else {
-              request.response.write("No value provided");
+          }
+          // *** 수정된 부분: /setOverride 라우터 (POST + JSON Body) ***
+          else if (request.uri.path == '/setOverride' && request.method == 'POST') {
+            // 예: Body = {"value":"odd"} or {"value":"even"} or {"value":"original"}
+            String body = await utf8.decoder.bind(request).join();
+            try {
+              var jsonBody = jsonDecode(body);
+              String? val = jsonBody["value"]?.toString();
+              if (val != null) {
+                restrictionOverride = val;
+                print("Override set to $val");
+                request.response.write("Override set to $val");
+              } else {
+                request.response.write("No 'value' field in JSON");
+              }
+            } catch (e) {
+              request.response.write("ERROR parsing JSON: $e");
             }
+            await request.response.close();
+          }
+          else {
+            // 그 외 라우트
+            request.response.write("No matching route");
             await request.response.close();
           }
         } catch (e) {
@@ -428,7 +441,6 @@ class TaskRunner {
   }
 }
 
-/// 설정 문자열 파싱
 class ParsedSetting {
   List<String> lotParts;
   String color;

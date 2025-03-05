@@ -16,12 +16,12 @@
             "text": "4, C03"
         },
         {
-            "text": "F2, C03"
+            "text": "F1, C03"
         }
     ],
     "IP": "192.168.0.214",
     "PORT": "5000",
-    "floor": "F1",
-    "db_url": "http://localhost:18181/holidays",
+    "floor": "F2",
+    "db_url": "http://192.168.0.30:18181/holidays",
     "digits": 3
 }
